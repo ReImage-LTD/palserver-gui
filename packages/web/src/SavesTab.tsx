@@ -20,6 +20,7 @@ import {
   type BackupSchedule,
   type InstanceSummary,
   type SaveHealthStatus,
+  type SaveCleanupPreview,
   type SavesStatus,
   type WorldSave,
 } from "@palserver/shared";
@@ -289,6 +290,10 @@ function HealthCard({
   const [status, setStatus] = useState<SaveHealthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<SaveCleanupPreview | null>(null);
+  const [selectedCleanupUids, setSelectedCleanupUids] = useState<string[]>([]);
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
 
   useEffect(() => {
     client
@@ -317,6 +322,23 @@ function HealthCard({
     if (entitled) void refresh();
   }, [entitled, refresh]);
 
+  useEffect(() => {
+    if (!status?.report) {
+      setCleanupPreview(null);
+      setSelectedCleanupUids([]);
+      return;
+    }
+    let cancelled = false;
+    client.saveCleanupPreview(instanceId, worldGuid)
+      .then((preview) => {
+        if (!cancelled) setCleanupPreview(preview);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => { cancelled = true; };
+  }, [client, instanceId, worldGuid, status?.report?.generatedAt]);
+
   const checking = status !== null && status.phase !== "idle";
   useEffect(() => {
     if (!checking) return;
@@ -330,6 +352,27 @@ function HealthCard({
       setStatus(await client.startSaveHealth(instanceId, worldGuid));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const cleanup = async () => {
+    const uids = selectedCleanupUids;
+    if (uids.length === 0 || running || cleaning) return;
+    if (!confirm(t("將永久移除選取玩家的角色、帕魯與玩家存檔。操作前會建立完整世界備份。確定繼續嗎?"))) return;
+    setCleaning(true);
+    setError(null);
+    try {
+      const result = await client.cleanupInactivePlayers(instanceId, worldGuid, uids);
+      setSelectedCleanupUids([]);
+      setCleanupNotice(t("已清理 {count} 位玩家。安全備份:{backup}", {
+        count: String(result.removedPlayers.length),
+        backup: result.safetyBackup,
+      }));
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCleaning(false);
     }
   };
 
@@ -389,6 +432,7 @@ function HealthCard({
       )}
 
       {!locked && error && <p className={errorCls}>{error}</p>}
+      {!locked && cleanupNotice && <p className="rounded-xl bg-grass/10 px-3 py-2 text-[13px] font-bold text-grass">{cleanupNotice}</p>}
       {!locked && status?.error && !checking && (
         <p className={errorCls}>
           {t("上次健檢失敗:{reason}", { reason: status.error })}
@@ -458,6 +502,53 @@ function HealthCard({
               </div>
             </div>
           )}
+          {cleanupPreview && (
+            <div className="rounded-cute border-2 border-line p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-extrabold">{t("清理不活躍玩家")}</p>
+                  <p className="text-xs text-ink-muted">
+                    {t("僅列出目前存檔仍在公會中的 30 天以上未上線玩家。需先停止伺服器;執行前會自動備份。")}
+                  </p>
+                </div>
+                <button
+                  className={`${btnGhost} inline-flex items-center gap-1.5 text-berry hover:border-berry`}
+                  onClick={() => void cleanup()}
+                  disabled={running || cleaning || selectedCleanupUids.length === 0 || !cleanupPreview.supported}
+                  title={running ? t("請先停止伺服器") : undefined}
+                >
+                  <FiTrash2 className="size-3.5" /> {cleaning ? t("清理中…") : t("清理所選玩家 ({count})", { count: String(selectedCleanupUids.length) })}
+                </button>
+              </div>
+              {running && <p className="mt-2 text-xs font-bold text-sun">{t("清理前請先停止伺服器。")}</p>}
+              {!cleanupPreview.supported && <p className="mt-2 text-xs text-sun">{cleanupPreview.reason ? t(cleanupPreview.reason) : null}</p>}
+              {cleanupPreview.supported && cleanupPreview.candidates.length === 0 && (
+                <p className="mt-2 text-xs text-ink-muted">{t("沒有可清理的玩家。")}</p>
+              )}
+              {cleanupPreview.supported && cleanupPreview.candidates.length > 0 && (
+                <div className="mt-2 flex flex-col divide-y divide-line rounded-cute border-2 border-line">
+                  {cleanupPreview.candidates.map((player) => (
+                    <label key={player.uid} className={`flex flex-wrap items-center gap-3 px-3 py-2 text-[13px] ${player.eligible ? "cursor-pointer" : "opacity-60"}`}>
+                      <input
+                        type="checkbox"
+                        className="accent-(--color-pal)"
+                        checked={selectedCleanupUids.includes(player.uid)}
+                        disabled={!player.eligible || cleaning || running}
+                        onChange={(e) => setSelectedCleanupUids((prev) => e.target.checked
+                          ? [...prev, player.uid]
+                          : prev.filter((uid) => uid !== player.uid))}
+                      />
+                      <span className="min-w-24 font-bold">{player.name}</span>
+                      <span className="flex-1 text-xs text-ink-muted">{player.guildName}</span>
+                      <span className="font-mono text-[11px] text-ink-muted">{player.uid.slice(0, 8)}</span>
+                      <span className="text-xs text-ink-muted">{t("{n} 天未上線", { n: String(player.lastOnlineDaysAgo ?? "?") })}</span>
+                      {!player.eligible && <span className="basis-full text-xs text-sun sm:basis-auto">{player.blockedReason ? t(player.blockedReason) : null}</span>}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {showDetails && report.emptyGuildNames.length > 0 && (
             <div>
               <p className="mb-1 text-xs font-extrabold text-ink-muted">{t("空公會")}</p>
@@ -465,7 +556,7 @@ function HealthCard({
             </div>
           )}
           <p className="text-xs text-ink-muted">
-            {t("這些統計僅供判讀參考;清理(瘦身)功能將在後續版本提供,屆時會強制先備份。")}
+            {t("這些統計僅供判讀參考;清理前會先預覽並建立安全備份。")}
           </p>
         </div>
       )}

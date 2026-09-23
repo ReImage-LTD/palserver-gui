@@ -1,12 +1,12 @@
 name: palsav-tools
 
-# 存檔健檢(save-slim)用的外部工具:把上游 PalworldSaveTools 的 src/palsav
+# 存檔管理用的外部工具:把上游 PalworldSaveTools 的 src/palsav
 # (palsav-flex,GPL-3.0,含原生 Oodle binding palooz)用 PyInstaller 凍結成
 # 獨立執行檔,發佈到本 repo 的 Release(tag 固定為 palsav-tools-v*)。
 #
 # GPL 隔離:這些執行檔「不隨 agent 發行」,agent 執行期才下載並以子行程呼叫
 # (packages/agent/src/save-tools.ts,比照 oodle.ts/ooz-wasm 的既有模式)。
-# 上游升版:改 upstream_ref 重跑,release_tag 升號,agent 的 PALSAV_TAG 常數同步 bump。
+# palsav-tools-v1 維持健檢工具;v2 加入清理指令。未來升版時同步調整 agent 端對應 tag。
 #
 # 注意:tag 刻意不是 v* 格式 —— self-update 用 parseVersion 過濾 release,
 # palsav-tools-v1 不會被誤認成 agent 新版;make_latest: false 也不污染 /releases/latest。
@@ -19,9 +19,9 @@ on:
         required: true
         default: "2c8c65c4a60b04e63eeb7f0c1857a5ba903a24d9"
       release_tag:
-        description: "發佈的 release tag(agent 的 PALSAV_TAG 要跟這個一致)"
+        description: "發佈的 release tag(清理工具目前使用 palsav-tools-v2)"
         required: true
-        default: "palsav-tools-v1"
+        default: "palsav-tools-v2"
 
 permissions:
   contents: write
@@ -47,6 +47,12 @@ jobs:
           repository: deafdudecomputers/PalworldSaveTools
           ref: ${{ inputs.upstream_ref }}
           path: upstream
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: palserver-source
 
       - uses: actions/setup-python@v5
         with:
@@ -76,18 +82,34 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools
           pip install ./palooz
           pip install .
-          pip install pyinstaller
+          pip install pyinstaller pytest
+
+      - name: Add isolated inactive-player cleanup command
+        run: |
+          cp ../../../palserver-source/tools/save-cleanup/cleanup_inactive.py palsav/cleanup_inactive.py
+          cat > entry.py <<'PY'
+          import sys
+          if len(sys.argv) > 1 and sys.argv[1] == "cleanup-inactive":
+              sys.argv.pop(1)
+              from palsav.cleanup_inactive import main
+              raise SystemExit(main())
+          from palsav.cli import main
+          main()
+          PY
+
+      - name: Test server-save cleanup mutations
+        run: python -m pytest ../../../palserver-source/tools/save-cleanup/tests -q
 
       # cli.py 用字串 __import__ 載子命令,PyInstaller 靜態分析追不到,
       # 全部子命令模組都要顯式 hidden-import。
       - name: Freeze with PyInstaller
         run: |
-          echo 'from palsav.cli import main; main()' > entry.py
           pyinstaller --onefile --name "${{ matrix.asset }}" \
             --hidden-import palsav.commands.convert \
             --hidden-import palsav.commands.backup \
             --hidden-import palsav.commands.diag \
             --hidden-import palsav.commands.roundtrip_validation \
+            --hidden-import palsav.cleanup_inactive \
             entry.py
           # --name 已含完整檔名(Windows 的 .exe 也在內),這裡只確認產物存在
           ls dist/
@@ -99,6 +121,7 @@ jobs:
         run: |
           chmod +x "dist/${{ matrix.asset }}" || true
           "./dist/${{ matrix.asset }}" --help
+          "./dist/${{ matrix.asset }}" cleanup-inactive --help
 
       - uses: actions/upload-artifact@v4
         with:
@@ -122,14 +145,18 @@ jobs:
           # GPL-3.0 散布要求:附上對應原始碼的取得方式(pin 到確切 commit)
           cat > SOURCE.txt <<EOF
           These binaries are PyInstaller-frozen builds of palsav-flex (GPL-3.0-or-later),
-          a subproject of deafdudecomputers/PalworldSaveTools, built unmodified from:
+          a subproject of deafdudecomputers/PalworldSaveTools, built from:
 
             https://github.com/deafdudecomputers/PalworldSaveTools/tree/${{ inputs.upstream_ref }}/src/palsav
 
           (On Windows the GCC-style optimization flags in palooz/setup.py are cleared
           for MSVC compatibility; see the palsav-tools workflow in this repository.)
 
-          Complete corresponding source: the URL above, pinned to commit ${{ inputs.upstream_ref }}.
+          Inactive-player cleanup command source (GPL-3.0-or-later):
+            https://github.com/${{ github.repository }}/blob/${{ github.sha }}/tools/save-cleanup/cleanup_inactive.py
+
+          Complete corresponding source: the upstream URL pinned to commit ${{ inputs.upstream_ref }}
+          plus the cleanup source URL above pinned to commit ${{ github.sha }}.
           License: GNU GPL v3 or later — https://www.gnu.org/licenses/gpl-3.0.html
 
           These tools are downloaded at runtime as separate programs and are not part of,
@@ -141,9 +168,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
-          name: ${{ inputs.release_tag }}(存檔健檢工具)
+          name: ${{ inputs.release_tag }}(存檔健檢與管理工具)
           body: |
-            存檔健檢(save-slim)用的凍結版 palsav 執行檔 — agent 執行期自動下載,不需手動安裝。
+            存檔健檢與非活躍玩家清理用的凍結版 palsav 執行檔 — agent 執行期自動下載,不需手動安裝。
 
             上游:deafdudecomputers/PalworldSaveTools @ `${{ inputs.upstream_ref }}`(GPL-3.0,詳見 SOURCE.txt)
           files: dist/*

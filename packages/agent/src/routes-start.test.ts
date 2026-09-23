@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startThroughUpdateGate, startWithPalDefenderRepair } from "./routes.js";
+import { acquireSaveCleanupLock } from "./save-operation-lock.js";
 import type { DriverContext } from "./driver.js";
 import type { InstanceRecord } from "./store.js";
 
@@ -34,6 +35,18 @@ test("start route skips start when the gate sees a manual stop", async () => {
 
   assert.equal(result, null);
   assert.equal(starts, 0);
+});
+
+test("start route refuses to start while server save cleanup holds its lock", async () => {
+  const release = acquireSaveCleanupLock(rec.id);
+  try {
+    await assert.rejects(
+      startThroughUpdateGate({ applyUpdateBeforeStart: async () => true }, rec, ctx, async () => true),
+      /Save cleanup is in progress/,
+    );
+  } finally {
+    release();
+  }
 });
 
 test("PalDefender repair does not report or refresh a failed second start", async () => {

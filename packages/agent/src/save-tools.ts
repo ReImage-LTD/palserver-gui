@@ -18,6 +18,9 @@ import type {
   SaveScanStats,
   SaveScanPlayerStat,
   SaveScanTopPal,
+  SaveCleanupPreview,
+  SaveCleanupCandidate,
+  SaveCleanupResult,
 } from "@palserver/shared";
 import { DEFAULT_AUTO_SCAN, topPalScore } from "@palserver/shared";
 import { AGENT_VERSION, DATA_DIR, GITHUB_REPO } from "./env.js";
@@ -27,6 +30,7 @@ import { dirSize, flushWorld, worldDirOf } from "./saves.js";
 import { analyzeLevelJsonFile, collectContainerContents, normGuid, type InventoryKind } from "./save-health.js";
 import { tarDirInPod } from "./k8s-files.js";
 import { ContainerHealthRunner } from "./runtime-health.js";
+import { isSaveCleanupLocked } from "./save-operation-lock.js";
 
 const execFileP = promisify(execFile);
 
@@ -43,8 +47,10 @@ const execFileP = promisify(execFile);
  * (save-health.ts)→ 報告落地 instanceDir/save-health.json。全程不改動存檔。
  */
 
-/** 對應本 repo Release tag(palsav-tools.yml 建置);升級工具時同步 bump。 */
+/** Existing read-only health tool release. */
 const PALSAV_TAG = "palsav-tools-v1";
+/** Separate writer-enabled build, kept isolated and downloaded only for cleanup. */
+const SAVE_CLEANUP_TAG = "palsav-tools-v2";
 const SUMS_ASSET = "SHA256SUMS.txt";
 /** convert 上限:大型世界要幾分鐘,但不該無限掛著。 */
 const CONVERT_TIMEOUT_MS = 30 * 60_000;
@@ -87,7 +93,7 @@ async function download(url: string, dest: string, onProgress?: (pct: number) =>
     redirect: "follow",
   });
   if (res.status === 404) {
-    throw new Error(`健檢工具尚未發佈(release ${PALSAV_TAG} 找不到資產)— 請先跑 palsav-tools workflow`);
+    throw new Error("存檔工具尚未發佈或找不到資產;請先發佈對應的 palsav-tools release");
   }
   if (!res.ok || !res.body) throw new Error(`下載健檢工具失敗:HTTP ${res.status}`);
   const total = Number(res.headers.get("content-length") ?? 0);
@@ -118,10 +124,14 @@ function expectedHash(sums: string, assetName: string): string | null {
 }
 
 /** 確保凍結的 palsav 執行檔就位(下載一次即快取;每次呼叫都重驗雜湊)。 */
-export async function ensurePalsav(rec: InstanceRecord, onProgress?: (pct: number) => void): Promise<string> {
+export async function ensurePalsav(
+  rec: InstanceRecord,
+  onProgress?: (pct: number) => void,
+  toolTag = PALSAV_TAG,
+): Promise<string> {
   const asset = palsavAssetName(rec);
   if (!asset) throw new Error("此平台不支援存檔健檢");
-  const dir = path.join(DATA_DIR, "tools", `palsav-${PALSAV_TAG}`);
+  const dir = path.join(DATA_DIR, "tools", `palsav-${toolTag}`);
   const bin = path.join(dir, asset);
   const sumsFile = path.join(dir, SUMS_ASSET);
 
@@ -134,7 +144,7 @@ export async function ensurePalsav(rec: InstanceRecord, onProgress?: (pct: numbe
   }
 
   fs.mkdirSync(dir, { recursive: true });
-  const base = `https://github.com/${GITHUB_REPO}/releases/download/${PALSAV_TAG}`;
+  const base = `https://github.com/${GITHUB_REPO}/releases/download/${toolTag}`;
 
   const sumsTmp = `${sumsFile}.part`;
   await download(`${base}/${SUMS_ASSET}`, sumsTmp);
@@ -142,7 +152,7 @@ export async function ensurePalsav(rec: InstanceRecord, onProgress?: (pct: numbe
   const expect = expectedHash(sums, asset);
   if (!expect) {
     fs.rmSync(sumsTmp, { force: true });
-    throw new Error(`release ${PALSAV_TAG} 的 ${SUMS_ASSET} 裡沒有 ${asset} 的雜湊`);
+    throw new Error(`release ${toolTag} 的 ${SUMS_ASSET} 裡沒有 ${asset} 的雜湊`);
   }
 
   const binTmp = `${bin}.part`;
@@ -745,6 +755,7 @@ async function runJob(rec: InstanceRecord, ctx: DriverContext, worldGuid: string
 export function startHealthCheck(rec: InstanceRecord, ctx: DriverContext, worldGuid: string): void {
   const support = saveHealthSupport(rec);
   if (!support.supported) throw fail(support.reason ?? "此環境不支援存檔健檢", 400);
+  if (isSaveCleanupLocked(rec.id)) throw fail("存檔清理進行中;請完成後再執行健檢", 409);
   if (jobs.has(rec.id)) throw fail("已有健檢正在進行,請等它完成", 409);
 
   jobs.set(rec.id, { worldGuid, phase: "download", pct: null });
@@ -771,5 +782,176 @@ export function getHealthStatus(rec: InstanceRecord, ctx: DriverContext, worldGu
     progressPct: running?.pct ?? null,
     error: lastErrors.get(`${rec.id}/${worldGuid}`) ?? null,
     report: readReports(ctx)[worldGuid] ?? null,
+  };
+}
+
+function uidKey(uid: string): string {
+  return uid.replace(/-/g, "").toLowerCase();
+}
+
+/** Cleanup mutates host-visible files; a stopped k8s Pod has no writable exec target. */
+function saveCleanupSupport(rec: InstanceRecord): { supported: boolean; reason?: string } {
+  if (rec.backend === "k8s") {
+    return { supported: false, reason: "Kubernetes 後端目前不支援存檔清理;伺服器停止時無法安全存取 Pod" };
+  }
+  const hostRecord = rec.backend === "docker" ? { ...rec, backend: "native" as const } : rec;
+  const support = saveHealthSupport(hostRecord);
+  if (!support.supported) {
+    return { supported: false, reason: "存檔清理需要 Windows 或 Linux x64 agent 主機" };
+  }
+  return { supported: true };
+}
+
+/** Build cleanup candidates only from a successful scan of the current save. */
+export async function getSaveCleanupPreview(
+  rec: InstanceRecord,
+  ctx: DriverContext,
+  worldGuid: string,
+): Promise<SaveCleanupPreview> {
+  const support = saveCleanupSupport(rec);
+  const report = readReports(ctx)[worldGuid];
+  const unavailable = (reason: string): SaveCleanupPreview => ({
+    worldGuid,
+    reportGeneratedAt: report?.generatedAt ?? "",
+    levelSavMtime: report?.levelSavMtime ?? "",
+    supported: false,
+    reason,
+    candidates: [],
+  });
+  if (!support.supported) return unavailable(support.reason ?? "此平台不支援存檔清理");
+  if (!report) return unavailable("請先執行存檔健檢,再清理玩家");
+
+  let currentMtime: number;
+  let mtimeHasSubseconds = rec.backend !== "k8s";
+  try {
+    if (rec.backend === "k8s") {
+      const seconds = await import("./k8s-files.js").then(({ execInPod }) =>
+        execInPod(rec, ["stat", "-c", "%Y", `/palworld/Pal/Saved/SaveGames/0/${worldGuid}/Level.sav`]),
+      );
+      currentMtime = Number(seconds.trim()) * 1000;
+      mtimeHasSubseconds = false;
+    } else {
+      currentMtime = fs.statSync(path.join(worldDirOf(rec, ctx, worldGuid), "Level.sav")).mtimeMs;
+    }
+  } catch {
+    return unavailable("無法確認目前 Level.sav 時間;請重新執行存檔健檢");
+  }
+  const scannedMtime = Date.parse(report.levelSavMtime);
+  const sameMtime = mtimeHasSubseconds
+    ? Math.trunc(currentMtime) === scannedMtime
+    : Math.floor(currentMtime / 1000) === Math.floor(scannedMtime / 1000);
+  if (!Number.isFinite(scannedMtime) || !sameMtime) {
+    return unavailable("健檢後世界存檔已變更;請重新執行存檔健檢");
+  }
+
+  const snapshot = readSnapshots(ctx)[worldGuid];
+  if (!snapshot) return unavailable("缺少玩家/公會快照;請重新執行存檔健檢");
+  const guilds = snapshot.guilds ?? [];
+  const candidates: SaveCleanupCandidate[] = report.inactivePlayers.map((player) => {
+    const uid = uidKey(player.uid);
+    const memberGuilds = guilds.filter((guild) => guild.members.some((m) => uidKey(m.uid) === uid));
+    let blockedReason: string | undefined;
+    if (!/^[0-9a-f]{32}$/.test(uid)) blockedReason = "玩家 UID 格式不正確";
+    else if (memberGuilds.length === 0) blockedReason = "目前掃描未找到玩家所屬公會";
+    else if (memberGuilds.some((guild) => guild.members.length <= 1)) {
+      blockedReason = "移除此玩家會使公會變成空公會";
+    }
+    return { ...player, eligible: !blockedReason, ...(blockedReason ? { blockedReason } : {}) };
+  });
+
+  return {
+    worldGuid,
+    reportGeneratedAt: report.generatedAt,
+    levelSavMtime: report.levelSavMtime,
+    supported: true,
+    candidates,
+  };
+}
+
+/** Validate the submitted selection independently of the UI preview. */
+export function validateSaveCleanupSelection(
+  candidates: SaveCleanupCandidate[],
+  guilds: SaveGuild[],
+  uids: string[],
+): SaveCleanupCandidate[] {
+  const selected = new Set(uids.map(uidKey));
+  if (selected.size !== uids.length || selected.size === 0) throw fail("請選取一位以上且不重複的玩家", 400);
+  const candidateByUid = new Map(candidates.map((candidate) => [uidKey(candidate.uid), candidate]));
+  const chosen: SaveCleanupCandidate[] = [];
+  for (const uid of selected) {
+    const candidate = candidateByUid.get(uid);
+    if (!candidate) throw fail("選取的玩家不在最新的不活躍玩家報告中;請重新掃描世界", 409);
+    if (!candidate.eligible) throw fail(candidate.blockedReason ?? "無法安全移除此玩家", 409);
+    chosen.push(candidate);
+  }
+
+  // A batch can empty a guild even though each candidate was individually safe.
+  for (const guild of guilds) {
+    const remaining = guild.members.filter((member) => !selected.has(uidKey(member.uid)));
+    if (guild.members.length > 0 && remaining.length === 0 && guild.members.some((member) => selected.has(uidKey(member.uid)))) {
+      throw fail(`清理後公會「${guild.name}」將變成空公會;請減少選取玩家`, 409);
+    }
+  }
+  return chosen;
+}
+
+/** Apply cleanup through the isolated palsav writer after the route backs up the stopped world. */
+export async function cleanupInactivePlayers(
+  rec: InstanceRecord,
+  ctx: DriverContext,
+  worldGuid: string,
+  uids: string[],
+): Promise<Omit<SaveCleanupResult, "safetyBackup">> {
+  const preview = await getSaveCleanupPreview(rec, ctx, worldGuid);
+  if (!preview.supported) throw fail(preview.reason ?? "此環境不支援存檔清理", 409);
+  if (jobs.has(rec.id)) throw fail("存檔掃描進行中;請等待完成後再清理", 409);
+
+  const chosen = validateSaveCleanupSelection(preview.candidates, readSnapshots(ctx)[worldGuid]?.guilds ?? [], uids);
+  const selected = new Set(chosen.map((candidate) => uidKey(candidate.uid)));
+  const chosenByUid = new Map(chosen.map((candidate) => [uidKey(candidate.uid), candidate]));
+
+  const hostRecord = rec.backend === "docker" ? { ...rec, backend: "native" as const } : rec;
+  const bin = await ensurePalsav(hostRecord, undefined, SAVE_CLEANUP_TAG);
+  const { stdout } = await execFileP(
+    bin,
+    ["cleanup-inactive", worldDirOf(rec, ctx, worldGuid), ...selected],
+    { windowsHide: true, timeout: CONVERT_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 },
+  );
+
+  let result: { removedPlayers: number; removedCharacters: number; deletedPlayerFiles: number; uids: string[] };
+  try {
+    result = JSON.parse(stdout.trim()) as typeof result;
+  } catch {
+    throw new Error(`存檔清理工具回傳無效結果:${stdout.slice(-300)}`);
+  }
+  const validResultUids = Array.isArray(result.uids) && result.uids.every((uid) => typeof uid === "string");
+  const removedUidSet = new Set(validResultUids ? result.uids.map(uidKey) : []);
+  if (
+    result.removedPlayers !== selected.size ||
+    !validResultUids ||
+    removedUidSet.size !== selected.size ||
+    [...selected].some((uid) => !removedUidSet.has(uid)) ||
+    !Number.isInteger(result.removedCharacters) ||
+    !Number.isInteger(result.deletedPlayerFiles)
+  ) {
+    throw new Error("清理工具回報與選取玩家不一致;如有需要請從安全備份還原");
+  }
+
+  // Invalidate stale scan products immediately; the route starts a fresh scan.
+  const reports = readReports(ctx);
+  delete reports[worldGuid];
+  fs.writeFileSync(reportsPath(ctx), JSON.stringify(reports, null, 2));
+  const snapshots = readSnapshots(ctx);
+  delete snapshots[worldGuid];
+  fs.writeFileSync(snapshotsPath(ctx), JSON.stringify(snapshots));
+
+  return {
+    worldGuid,
+    removedPlayers: result.uids.map((uid) => ({
+      uid,
+      name: chosenByUid.get(uidKey(uid))?.name ?? "?",
+    })),
+    removedCharacters: result.removedCharacters,
+    deletedPlayerFiles: result.deletedPlayerFiles,
   };
 }

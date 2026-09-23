@@ -2,23 +2,25 @@ import { useEffect, useState } from "react";
 import { FiChevronDown } from "react-icons/fi";
 
 /**
- * i18n:繁中(zh-TW,原文)/ 簡中 / 英 / 日。
+ * i18n:English is the default and fallback language; also supports 繁中 / 简中 / 日本語 / Norsk / Svenska.
  *
  * 設計:程式碼裡的字串一律寫繁中原文,t() 拿原文當 key 查字典;其他語言字典是
- * public/i18n/{zh-CN,en,ja}.json 的「繁中 → 譯文」對照表,查不到就顯示繁中原文,
+ * public/i18n/*.json 的「繁中 → 譯文」對照表,查不到時優先回退 English,
  * 所以漏翻不會壞版面。插值用 {名稱} 佔位,例:t("第 {n} 天", { n })。
  *
  * 簡中使用同源 bundled 檔(/i18n/zh-CN.json),確保人工校對版本不被遠端覆蓋。
- * 英/日則比照 promoConfig:localStorage 快取 → bundled → GitHub raw 背景更新。
+ * 其他語言使用 localStorage 快取 → bundled → GitHub raw 背景更新。
  */
 
-export type Lang = "zh" | "zh-CN" | "en" | "ja";
+export type Lang = "en" | "ja" | "zh-CN" | "no" | "sv" | "zh";
 
 export const LANG_LABELS: Record<Lang, string> = {
-  zh: "繁體中文",
-  "zh-CN": "简体中文",
   en: "English",
   ja: "日本語",
+  "zh-CN": "简体中文",
+  no: "Norsk",
+  sv: "Svenska",
+  zh: "繁體中文",
 };
 
 const KEY = "palserver.lang";
@@ -30,11 +32,11 @@ const REMOTE_BASE =
 type Dict = Record<string, string>;
 
 function isLang(value: string | null): value is Lang {
-  return value === "zh" || value === "zh-CN" || value === "en" || value === "ja";
+  return value === "zh" || value === "zh-CN" || value === "en" || value === "ja" || value === "no" || value === "sv";
 }
 
 function htmlLang(l: Lang): string {
-  return l === "zh" ? "zh-TW" : l;
+  return l === "zh" ? "zh-TW" : l === "no" ? "nb" : l;
 }
 
 function detectLang(): Lang {
@@ -44,11 +46,8 @@ function detectLang(): Lang {
   } catch {
     /* ignore */
   }
-  const nav = (navigator.language || "").toLowerCase();
-  if (nav.startsWith("zh")) {
-    return /(^|-)zh-(tw|hk|mo|hant)(-|$)/.test(nav) ? "zh" : "zh-CN";
-  }
-  if (nav.startsWith("ja")) return "ja";
+  // English is the product's primary/default UI language. Other locales are
+  // selected explicitly so a browser's language never changes the UI silently.
   return "en";
 }
 
@@ -156,7 +155,7 @@ export function setLang(next: Lang): void {
 
 /** 翻譯:原文(中文)→ 目前語言;插值 {k} 以 params[k] 代入。 */
 export function t(source: string, params?: Record<string, string | number>): string {
-  let out = (lang !== "zh" && dicts[lang]?.[source]) || source;
+  let out = lang === "zh" ? source : dicts[lang]?.[source] ?? dicts.en?.[source] ?? source;
   if (params) {
     for (const [k, v] of Object.entries(params)) out = out.split(`{${k}}`).join(String(v));
   }
@@ -186,6 +185,8 @@ export function useI18n(): { lang: Lang; setLang: (l: Lang) => void; t: typeof t
 /** 啟動:套 <html lang> 並預載目前語言的字典(main.tsx 掛載前呼叫)。 */
 export function initI18n(): void {
   document.documentElement.lang = htmlLang(lang);
+  // English is the fallback for partially translated locales (currently no/sv).
+  void loadDict("en");
   void loadDict(lang);
 }
 

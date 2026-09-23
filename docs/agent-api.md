@@ -232,6 +232,8 @@ Base path 皆為實例的伺服器根目錄(native)或 Pod 內 `/palworld` 根�
 | `GET /api/instances/:id/saves/guilds-snapshot` | `?worldGuid`(省略 = 啟用中世界) | 公會快照(存檔掃描產出) | |
 | `GET /api/instances/:id/saves/health` | `?worldGuid` | 型別 `SaveHealthStatus` | 存檔健檢(唯讀分析)目前狀態 |
 | `POST /api/instances/:id/saves/health` | `{ worldGuid }` | `202` + `SaveHealthStatus` | 觸發一次健檢掃描(非同步) |
+| `GET /api/instances/:id/saves/cleanup-preview` | `?worldGuid` | 型別 `SaveCleanupPreview` | 預覽目前掃描中可清理的不活躍玩家;若 Level.sav 已變更會拒絕提供候選 |
+| `POST /api/instances/:id/saves/cleanup-inactive` | `{ worldGuid, uids }` | 型別 `SaveCleanupResult` | 停止伺服器後清理選取玩家;會先建立完整安全備份,不允許清空公會 |
 | `POST /api/instances/:id/saves/host-fix` | `{ worldGuid, oldSav, newSav }` | 型別 `HostFixResult` | 主機角色修復(共玩存檔搬上專用伺服器);動手前強制備份 |
 | `POST /api/instances/:id/saves/pal-owner-fix` | `{ worldGuid, toSav }` | 過戶結果 | 把殘留共玩 host uid 名下的帕魯過戶給指定玩家存檔;動手前強制備份 |
 | `DELETE /api/instances/:id/saves/player` | `?worldGuid&file` | `204` | 刪除單一玩家存檔 |

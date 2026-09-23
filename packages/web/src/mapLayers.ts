@@ -30,8 +30,11 @@ export interface LocalizedName {
   ja: string;
 }
 
-function localizedLabel(name: LocalizedName, lang: Lang): string {
-  return (lang === "zh-CN" ? name["zh-CN"] ?? name.zhCN : name[lang]) || name.en;
+export function localizedLabel(name: LocalizedName, lang: Lang): string {
+  if (lang === "zh") return name.zh || name.en;
+  if (lang === "zh-CN") return name["zh-CN"] ?? name.zhCN ?? name.zh ?? name.en;
+  if (lang === "ja") return name.ja || name.en;
+  return name.en;
 }
 
 /** 靜態地標(paldb.cc 的地圖資料;x/y 已經是地圖座標系,不需再經 savToMap)。 */

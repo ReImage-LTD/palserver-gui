@@ -1,6 +1,8 @@
 # palserver GUI
 
-[繁體中文](README.md) | [简体中文](README.zh-CN.md) | **English** | [日本語](README.ja.md)
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
+
+> This project is a hard fork of [palserver-gui](https://github.com/palserver-gui/palserver-gui).
 
 <p align="center"><a href="https://palserver-GUI.iosoftware.ai"><b>Official site: palserver-GUI.iosoftware.ai</b></a> — downloads, guides & FAQ</p>
 
@@ -13,7 +15,7 @@ Run one agent on your host machine, then manage the server from a browser — st
 
 ## Screenshots
 
-> The UI ships in 繁體中文 / 简体中文 / English / 日本語, with six switchable themes (Pal (default) / Silver / Aurora Jade / Midnight Lilac / Sakura Pink / Orange Cat), each with a light and dark variant; players and data in the screenshots are demo content.
+> The UI defaults to English and offers 繁體中文 / 简体中文 / 日本語 / Norsk / Svenska. Norwegian and Swedish currently fall back to English for untranslated strings. Six switchable themes (Pal (default) / Silver / Aurora Jade / Midnight Lilac / Sakura Pink / Orange Cat) each have light and dark variants; players and data in the screenshots are demo content.
 
 ![Player management](docs/screenshots/players.png)
 
@@ -82,6 +84,7 @@ If you hit a problem, check the **[FAQ](https://faq.toc.icu/)** first, or ask on
 - Scheduled automatic backups: interval, retention count, skip when nobody is online
 - Manual backup / restore / download; restoring automatically backs up the current world first
 - Multi-world management: list all worlds, switch the active world, delete individual player saves; the player character list refreshes live
+- Save health scans with selective cleanup of 30+ day inactive players; cleanup requires a stopped server, previews candidates, protects guilds from being emptied, and creates a full safety backup first (Windows/Linux x64 hosts; Kubernetes cleanup is not yet supported)
 
 **Mods**
 - One-click install / update / remove for **PalDefender** (anti-cheat, formerly Palguard) and **UE4SS** (Lua/Blueprint mod loader), each with stable and beta channels
@@ -101,7 +104,7 @@ If you hit a problem, check the **[FAQ](https://faq.toc.icu/)** first, or ask on
 - Custom Pals / eggs, guild base details, landmark names
 
 **Other**
-- Four languages: 繁體中文 / 简体中文 / English / 日本語; **six themes** (Pal (default) / Silver / Aurora Jade / Midnight Lilac / Sakura Pink / Orange Cat) **×** light / dark — some themes are sponsor-exclusive
+- Six languages: English (default) / 日本語 / 简体中文 / Norsk / Svenska / 繁體中文; Norwegian and Swedish fall back to English for untranslated strings. **Six themes** (Pal (default) / Silver / Aurora Jade / Midnight Lilac / Sakura Pink / Orange Cat) **×** light / dark — some themes are sponsor-exclusive
 - **Drag-to-reorder** server cards on the home page; tabs can be **customized (show / hide)**; the overview card can be dismissed
 - Connectivity diagnostics: detects your public IP, whether you're behind NAT/CGNAT, plus VPN (Tailscale / Radmin) hosting guides
 - Optional GUI self-update: checks GitHub Releases, verifies SHA256, swaps binaries and restarts itself

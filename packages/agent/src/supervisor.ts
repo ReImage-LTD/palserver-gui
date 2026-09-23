@@ -16,6 +16,7 @@ import { getPalDefenderConfig } from "./paldefender-config.js";
 import { newestPalDefenderLogLines } from "./native.js";
 import { cachedVersionSummary, refreshImageVersionSummary } from "./version.js";
 import { emitAgentEvent } from "./events.js";
+import { isSaveCleanupLocked } from "./save-operation-lock.js";
 
 /**
  * Automatic restarts, three triggers:
@@ -505,6 +506,15 @@ export class RestartSupervisor {
         });
         return;
       }
+      if (isSaveCleanupLocked(rec.id)) {
+        this.record(rec.id, state, {
+          at: new Date().toISOString(),
+          reason: "crash",
+          ok: false,
+          detail: "存檔清理進行中,略過自動重啟以避免同時寫入世界存檔",
+        });
+        return;
+      }
       const started = await driver.start(rec, ctx);
       const at = new Date().toISOString();
       if (started) {
@@ -679,6 +689,17 @@ export class RestartSupervisor {
           reason,
           ok: false,
           detail: "更新準備期間偵測到手動停止 — 尊重停止指令,本次重啟取消(伺服器維持停止)。",
+        });
+        return;
+      }
+      if (isSaveCleanupLocked(rec.id)) {
+        const locked = this.readState(rec.id);
+        locked.lastDailyFire = state.lastDailyFire;
+        this.record(rec.id, locked, {
+          at: new Date().toISOString(),
+          reason,
+          ok: false,
+          detail: "存檔清理進行中,略過自動重啟以避免同時寫入世界存檔",
         });
         return;
       }

@@ -53,6 +53,8 @@ import type {
   SaveGuild,
   SaveBreedingSnapshot,
   SaveHealthStatus,
+  SaveCleanupPreview,
+  SaveCleanupResult,
   SavePlayerProfile,
   SavePlayersSummary,
   SaveScanStats,
@@ -963,6 +965,17 @@ export class AgentClient {
     return this.request(`/api/instances/${id}/saves/health`, {
       method: "POST",
       body: JSON.stringify({ worldGuid }),
+    });
+  }
+
+  saveCleanupPreview(id: string, worldGuid: string): Promise<SaveCleanupPreview> {
+    return this.request(`/api/instances/${id}/saves/cleanup-preview?worldGuid=${encodeURIComponent(worldGuid)}`);
+  }
+
+  cleanupInactivePlayers(id: string, worldGuid: string, uids: string[]): Promise<SaveCleanupResult> {
+    return this.request(`/api/instances/${id}/saves/cleanup-inactive`, {
+      method: "POST",
+      body: JSON.stringify({ worldGuid, uids }),
     });
   }
 

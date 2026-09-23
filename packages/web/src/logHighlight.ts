@@ -89,7 +89,7 @@ export function genericLine(raw: string): { time: string; message: string } | nu
 
 /** 目前介面語言 → Google Translate 的目標語碼。 */
 export function translateTarget(lang: Lang = getLang()): string {
-  return lang === "zh" ? "zh-TW" : lang === "zh-CN" ? "zh-CN" : lang === "ja" ? "ja" : "en";
+  return lang === "zh" ? "zh-TW" : lang === "zh-CN" ? "zh-CN" : lang;
 }
 
 const HL_KEY = "palserver.logHighlight";

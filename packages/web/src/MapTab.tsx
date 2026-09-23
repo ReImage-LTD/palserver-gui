@@ -33,6 +33,7 @@ import {
   TREE_IMAGE_BOUNDS,
   LANDMARK_STYLE,
   escapeHtml,
+  localizedLabel,
   loadMapLayers,
   type Landmark,
   type Boss,
@@ -42,7 +43,7 @@ import { GuildDetailModal as SaveGuildDetailModal, BasePeekModal, BaseDetailModa
 import { PlayerActionsMenu } from "./PlayerActionsMenu";
 import { PublicMapModal } from "./PublicMapModal";
 import { SummonModal } from "./SummonModal";
-import { t, useI18n } from "./i18n";
+import { LangSelect, t, useI18n, type Lang } from "./i18n";
 import { SHOW_FAST_TRAVEL_UNLOCK } from "./flags";
 import { Overlay, btn, btnGhost, card, errorCls } from "./ui";
 
@@ -411,6 +412,7 @@ export function MapTab({
           <button className={btnGhost} onClick={refresh} aria-label={t("重新整理")}>
             <FiRefreshCw className="size-4" />
           </button>
+          {fullscreen && <LangSelect />}
           {!fullscreen && (
             <button className={`${btnGhost} inline-flex items-center gap-1.5`} onClick={closeOverlay}>
               <FiX className="size-4" /> {t("關閉")}
@@ -896,7 +898,7 @@ function PlayerMap({
   bossState: BossRespawnState | null;
   /** 公會詳情點成員後要跳到的地圖座標(n 為 nonce,同點重點也會觸發)。 */
   focus: { x: number; y: number; n: number } | null;
-  lang: "zh" | "zh-CN" | "en" | "ja";
+  lang: Lang;
   showPlayers: boolean;
   showOffline: boolean;
   showBases: boolean;
@@ -1053,7 +1055,7 @@ function PlayerMap({
         L.marker([lm.y, lm.x], { icon })
           .bindTooltip(
             `<div style="font-weight:800">${escapeHtml(
-              (lang === "zh-CN" ? lm.name["zh-CN"] ?? lm.name.zhCN : lm.name[lang]) || lm.name.en,
+              localizedLabel(lm.name, lang),
             )}</div>` +
               `<div>${t(style.label)}${lm.lv ? ` · Lv.${lm.lv}` : ""}</div>`,
             { direction: "top", className: "pmap-detail" },
@@ -1118,7 +1120,7 @@ function PlayerMap({
         L.marker([b.y, b.x], { icon, riseOnHover: true })
           .bindTooltip(
             `<div style="font-weight:800">${escapeHtml(
-              (lang === "zh-CN" ? b.name["zh-CN"] ?? b.name.zhCN : b.name[lang]) || b.name.en,
+              localizedLabel(b.name, lang),
             )}</div>` +
               `<div>${t(sealed ? "封印領域" : "阿爾法")}${b.lv ? ` · Lv.${b.lv}` : ""}</div>` +
               (dead

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { extractPaldeck, getBreedingSnapshot } from "./save-tools.js";
+import { extractPaldeck, getBreedingSnapshot, validateSaveCleanupSelection } from "./save-tools.js";
 import type { DriverContext } from "./driver.js";
 
 // 形狀出處:KrisCris/Palworld-Pal-Editor player_entity.py:383-408(palworld-save-tools JSON 慣例)。
@@ -115,6 +115,25 @@ test("getBreedingSnapshot:攤平玩家與據點帕魯並保留來源", () => {
   } finally {
     fs.rmSync(instanceDir, { recursive: true, force: true });
   }
+});
+
+test("validateSaveCleanupSelection:拒絕未知/封鎖 UID 與會清空公會的批次", () => {
+  const candidates = [
+    { uid: "a", name: "A", guildName: "G", lastOnlineDaysAgo: 40, eligible: true },
+    { uid: "b", name: "B", guildName: "G", lastOnlineDaysAgo: 50, eligible: true },
+    { uid: "c", name: "C", guildName: "Other", lastOnlineDaysAgo: 60, eligible: false, blockedReason: "keep" },
+  ];
+  const guilds = [{
+    id: "g", name: "G", adminUid: null, baseCampLevel: null,
+    members: [{ uid: "a", name: "A", lastOnlineDaysAgo: 40 }, { uid: "b", name: "B", lastOnlineDaysAgo: 50 }],
+    bases: [], storage: null, research: null,
+  }];
+
+  assert.deepEqual(validateSaveCleanupSelection(candidates, guilds, ["a"]), [candidates[0]]);
+  assert.throws(() => validateSaveCleanupSelection(candidates, guilds, ["a", "b"]), /空公會/);
+  assert.throws(() => validateSaveCleanupSelection(candidates, guilds, ["missing"]), /最新的不活躍玩家報告/);
+  assert.throws(() => validateSaveCleanupSelection(candidates, guilds, ["c"]), /keep/);
+  assert.throws(() => validateSaveCleanupSelection(candidates, guilds, ["a", "a"]), /不重複/);
 });
 
 test("computeScanStats:公會深度欄位(成員等級對聯/活躍/駐守/倉庫/研究/資產)", async () => {

@@ -27,7 +27,9 @@ export interface Announcement {
 export function isActive(a: Announcement): boolean {
   if (a.enabled === false) return false;
   if (a.until && new Date().toISOString().slice(0, 10) > a.until) return false;
-  if (a.lang && a.lang !== getLang()) return false;
+  const current = getLang();
+  const announcementLang = current === "no" || current === "sv" ? "en" : current;
+  if (a.lang && a.lang !== announcementLang) return false;
   return true;
 }
 

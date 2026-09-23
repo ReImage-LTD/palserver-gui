@@ -30,7 +30,11 @@ interface Boss {
 type FrameBoss = Boss & { world: "main" | "tree" };
 
 function bossName(b: Boss, lang: ReturnType<typeof getLang>): string {
-  const n = lang === "zh-CN" ? b.name["zh-CN"] ?? b.name.zhCN : b.name[lang];
+  const n = lang === "zh"
+    ? b.name.zh
+    : lang === "zh-CN"
+      ? b.name["zh-CN"] ?? b.name.zhCN ?? b.name.zh
+      : lang === "ja" ? b.name.ja : b.name.en;
   return n || b.name.en;
 }
 

@@ -10,6 +10,7 @@ import { configPlatformDir } from "./platform.js";
 import { serverRoot } from "./native.js";
 import { saveWorld } from "./world-save.js";
 import { execInPod, listDirInPod, readFileInPod, tarDirInPod, untarIntoPod, writeFileInPod } from "./k8s.js";
+import { isSaveCleanupLocked } from "./save-operation-lock.js";
 
 const execFileP = promisify(execFile);
 
@@ -506,7 +507,11 @@ export async function createBackup(
   rec: InstanceRecord,
   ctx: DriverContext,
   worldGuid: string,
+  options: { allowDuringCleanup?: boolean } = {},
 ): Promise<BackupInfo> {
+  if (isSaveCleanupLocked(rec.id) && !options.allowDuringCleanup) {
+    throw fail("存檔清理進行中;請完成後再建立備份", 409);
+  }
   assertWorldGuid(worldGuid);
   requireFileCapable(rec);
   const flush = await flushWorld(rec);

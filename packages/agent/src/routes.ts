@@ -90,12 +90,16 @@ import {
   getHealthStatus,
   getPlayerProfile,
   getPlayersSummary,
+  getSaveCleanupPreview,
+  cleanupInactivePlayers,
+  validateSaveCleanupSelection,
   getStatsHistory,
   readAutoScan,
   startHealthCheck,
   writeAutoScan,
 } from "./save-tools.js";
 import { applyHostFix, transferPalOwners } from "./host-save-fix.js";
+import { acquireSaveCleanupLock, isSaveCleanupLocked } from "./save-operation-lock.js";
 import { getEngineSettings, writeEngineSettings } from "./engine-ini.js";
 import { getConfigHealth, regenerateConfig } from "./config-health.js";
 import {
@@ -263,6 +267,9 @@ export async function startThroughUpdateGate<T>(
   ctx: DriverContext,
   start: (rec: InstanceRecord) => Promise<T>,
 ): Promise<T | null> {
+  if (isSaveCleanupLocked(rec.id)) {
+    throw Object.assign(new Error("Save cleanup is in progress; this server cannot be started yet"), { statusCode: 409 });
+  }
   const canStart = await supervisor.applyUpdateBeforeStart(rec, ctx, {
     markRunning: true,
     respectManualStop: true,
@@ -1187,6 +1194,7 @@ export function registerRoutes(
 
   app.post("/api/instances/:id/restart", async (req) => {
     let rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     // 「取消重啟」:比照停止 —— 中止倒數並標記取消,原請求醒來看到 cancelled 就不重啟。
     if (AnnounceBody.safeParse(req.body ?? {}).data?.cancel) {
       const pending = pendingCountdowns.get(rec.id);
@@ -1209,6 +1217,7 @@ export function registerRoutes(
 
   app.delete("/api/instances/:id", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     // 真正刪除。driver.remove 負責各後端的收尾:停止行程 / 移除容器 / 刪除 agent
     // 自行安裝的外部目錄(native)。k8s 只縮到 0、刻意保留叢集 PVC(那不是我們建的)。
     await driverOf(rec).remove(rec, ctxOf(rec));
@@ -1226,6 +1235,7 @@ export function registerRoutes(
    *  瀏覽器直接開這個網址下載(token 走 query,見 auth)。目前僅 native。 */
   app.get("/api/instances/:id/export", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     if (rec.backend === "k8s") {
       return reply.code(400).send({ error: "export 請透過鏡像遷移功能(k8s 走 Pod exec)" });
     }
@@ -1243,6 +1253,7 @@ export function registerRoutes(
    *  但不複製數十 GB 的遊戲執行檔(新實例自行安裝)。目前僅 native;需先停止來源。 */
   app.post("/api/instances/:id/duplicate", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     if (rec.backend === "k8s") {
       return reply.code(400).send({ error: "duplicate 請透過鏡像遷移功能(k8s)" });
     }
@@ -2482,6 +2493,17 @@ export function registerRoutes(
   // ── world saves & backups ──
   const isRunning = async (rec: InstanceRecord) =>
     (await driverOf(rec).status(rec, ctxOf(rec))).status === "running";
+  const assertServerStoppedForSaveCleanup = async (rec: InstanceRecord) => {
+    const status = (await driverOf(rec).status(rec, ctxOf(rec))).status;
+    if (status !== "created" && status !== "exited" && status !== "missing") {
+      throw Object.assign(new Error("請先停止伺服器並等待啟動/重啟程序完成,再清理玩家存檔"), { statusCode: 409 });
+    }
+  };
+  const assertNoSaveCleanup = (rec: InstanceRecord) => {
+    if (isSaveCleanupLocked(rec.id)) {
+      throw Object.assign(new Error("存檔清理進行中;請完成後再操作這個世界"), { statusCode: 409 });
+    }
+  };
 
   app.get("/api/instances/:id/saves", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
@@ -2517,6 +2539,7 @@ export function registerRoutes(
   // ── 帕魯歸屬過戶(主機角色已修復但帕魯仍掛在共玩殘留 uid 的世界用)──
   app.post("/api/instances/:id/saves/pal-owner-fix", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldGuid, toSav } = z
       .object({
         worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法"),
@@ -2542,6 +2565,7 @@ export function registerRoutes(
   // ── 停用共玩遺留的 WorldOptions.sav(它會蓋掉 ini 的世界設定與 AdminPassword)──
   app.post("/api/instances/:id/saves/world-options-fix", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldGuid } = z
       .object({ worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法") })
       .parse(req.body);
@@ -2568,6 +2592,51 @@ export function registerRoutes(
     startHealthCheck(rec, ctxOf(rec), worldGuid);
     reply.code(202);
     return getHealthStatus(rec, ctxOf(rec), worldGuid);
+  });
+
+  // ── Selective cleanup of inactive players from a stopped server world ──
+  app.get("/api/instances/:id/saves/cleanup-preview", async (req) => {
+    const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
+    const { worldGuid } = z
+      .object({ worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法") })
+      .parse(req.query);
+    return getSaveCleanupPreview(rec, ctxOf(rec), worldGuid);
+  });
+
+  app.post("/api/instances/:id/saves/cleanup-inactive", async (req) => {
+    const rec = getOr404((req.params as { id: string }).id);
+    const { worldGuid, uids } = z
+      .object({
+        worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法"),
+        uids: z.array(z.string().regex(/^[0-9a-f]{32}$/i, "玩家 UID 格式不合法")).min(1).max(100),
+      })
+      .parse(req.body);
+    const releaseCleanupLock = acquireSaveCleanupLock(rec.id);
+    try {
+      await assertServerStoppedForSaveCleanup(rec);
+      const ctx = ctxOf(rec);
+      const preview = await getSaveCleanupPreview(rec, ctx, worldGuid);
+      if (!preview.supported) {
+        throw Object.assign(new Error(preview.reason ?? "此環境不支援伺服器存檔清理"), { statusCode: 409 });
+      }
+      if (getHealthStatus(rec, ctx, worldGuid).phase !== "idle") {
+        throw Object.assign(new Error("存檔掃描進行中;請等待完成後再清理"), { statusCode: 409 });
+      }
+      validateSaveCleanupSelection(preview.candidates, getGuildsSnapshot(ctx, worldGuid).guilds, uids);
+      // Backup first. If parsing, serialization, or verification fails, the
+      // original world can be restored from this archive.
+      const backup = await saves.createBackup(rec, ctx, worldGuid, { allowDuringCleanup: true });
+      try {
+        await assertServerStoppedForSaveCleanup(rec);
+      } catch {
+        throw Object.assign(new Error("伺服器已在備份期間重新啟動;為避免損壞存檔,已取消清理。備份保留於備份清單。"), { statusCode: 409 });
+      }
+      const result = await cleanupInactivePlayers(rec, ctx, worldGuid, uids);
+      return { ...result, safetyBackup: backup.name };
+    } finally {
+      releaseCleanupLock();
+    }
   });
 
   // ── 玩家快照(存檔掃描產出;玩家詳情頁「從存檔刷新」讀這裡)──
@@ -2635,6 +2704,7 @@ export function registerRoutes(
   // ── 主機角色修復(內建 palworld-host-save-fix,共玩存檔搬上專用伺服器用)──
   app.post("/api/instances/:id/saves/host-fix", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldGuid, oldSav, newSav } = z
       .object({
         worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法"),
@@ -2659,6 +2729,7 @@ export function registerRoutes(
 
   app.post("/api/instances/:id/import-save", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldPath, overwrite } = z
       .object({ worldPath: z.string().min(1).max(500), overwrite: z.boolean().optional() })
       .parse(req.body);
@@ -2670,12 +2741,14 @@ export function registerRoutes(
 
   app.post("/api/instances/:id/saves/restore", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { backup } = z.object({ backup: z.string().min(1).max(200) }).parse(req.body);
     return saves.restoreBackup(rec, ctxOf(rec), backup, await isRunning(rec));
   });
 
   app.delete("/api/instances/:id/saves/backup", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { name } = z.object({ name: z.string().min(1).max(200) }).parse(req.query);
     saves.deleteBackup(ctxOf(rec), name);
     reply.code(204);
@@ -2692,6 +2765,7 @@ export function registerRoutes(
 
   app.post("/api/instances/:id/saves/active", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldGuid } = z.object({ worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法") }).parse(req.body);
     const running = await isRunning(rec);
     // native edits the ini on the host (server must be stopped); k8s writes it
@@ -2708,6 +2782,7 @@ export function registerRoutes(
 
   app.delete("/api/instances/:id/saves/player", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(rec);
     const { worldGuid, file } = z
       .object({ worldGuid: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "世界 GUID 格式不合法"), file: z.string().min(1).max(100) })
       .parse(req.query);
@@ -2718,8 +2793,10 @@ export function registerRoutes(
   // ── world mirror (同 agent 內 instance 間存檔+INI 鏡像遷移) ──
   app.post("/api/instances/:id/mirror", async (req) => {
     const srcRec = getOr404((req.params as { id: string }).id);
+    assertNoSaveCleanup(srcRec);
     const { targetId } = z.object({ targetId: z.string().min(1).max(64) }).parse(req.body);
     const dstRec = getOr404(targetId);
+    assertNoSaveCleanup(dstRec);
     if (srcRec.id === dstRec.id) throw Object.assign(new Error("不能鏡像到自己"), { statusCode: 409 });
     const result = await saves.mirrorWorld(srcRec, ctxOf(srcRec), dstRec, ctxOf(dstRec));
     return { mirrored: true, worldGuid: result.worldGuid, targetId: dstRec.id };

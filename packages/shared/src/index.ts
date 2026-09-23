@@ -988,6 +988,29 @@ export interface SaveHealthStatus {
   report: SaveHealthReport | null;
 }
 
+/** Server-world cleanup UI candidate and action response. */
+export interface SaveCleanupCandidate extends SaveHealthPlayerRow {
+  eligible: boolean;
+  blockedReason?: string;
+}
+
+export interface SaveCleanupPreview {
+  worldGuid: string;
+  reportGeneratedAt: string;
+  levelSavMtime: string;
+  supported: boolean;
+  reason?: string;
+  candidates: SaveCleanupCandidate[];
+}
+
+export interface SaveCleanupResult {
+  worldGuid: string;
+  removedPlayers: { uid: string; name: string }[];
+  removedCharacters: number;
+  deletedPlayerFiles: number;
+  safetyBackup: string;
+}
+
 /* ── automatic restarts ── */
 
 export type RestartReason = "scheduled" | "memory" | "crash" | "manual" | "update" | "startup-failure";
